@@ -48,9 +48,19 @@ static const char *TAG = "MINITOP";
 #define ROWS 2
 #define COLS 3
 
+// TODO GPIO values are arbitrary as of now. needs to be updated
+#define GPIO_OUTPUT_IO_0 21
+#define GPIO_OUTPUT_IO_1 22
+#define GPIO_OUTPUT_PIN_SEL  ((1ULL<<GPIO_OUTPUT_IO_0) | (1ULL<<GPIO_OUTPUT_IO_1))
+
+#define GPIO_INPUT_IO_0 18
+#define GPIO_INPUT_IO_1 19
+#define GPIO_INPUT_IO_2 20
+#define GPIO_INPUT_PIN_SEL  ((1ULL<<GPIO_INPUT_IO_0) | (1ULL<<GPIO_INPUT_IO_1) | (1ULL<<GPIO_INPUT_IO_2))
+
 // TODO
-gpio_num_t row_pins[ROWS] = {18, 19};
-gpio_num_t col_pins[COLS] = {23, 5, 17};
+gpio_num_t row_pins[ROWS] = {GPIO_INPUT_IO_0, GPIO_INPUT_IO_1};
+gpio_num_t col_pins[COLS] = {GPIO_INPUT_IO_0, GPIO_INPUT_IO_1, GPIO_INPUT_IO_2};
 
 typedef struct {
     uint8_t row;
@@ -193,54 +203,52 @@ typedef struct {
 //     }
 // }
 
-// void keyscan_task(void *arg) {
-//     key_event_t event;
+void keyscan_task(void *arg) {
+    key_event_t event;
 
-//     while (1)
-//     {
-//         for (int r = 0; r < ROWS; r++)
-//         {
-//             gpio_set_level(row_pins[r], 0);
+    while (1) {
+        for (int r = 0; r < ROWS; r++) {
+            // set to low
+            gpio_set_level(row_pins[r], 0);
 
-//             for (int c = 0; c < COLS; c++)
-//             {
-//                 if (gpio_get_level(col_pins[c]) == 0)
-//                 {
-//                     event.row = r;
-//                     event.col = c;
+            for (int c = 0; c < COLS; c++) {
+                // if signal low, col is being pressed
+                if (gpio_get_level(col_pins[c]) == 0) {
+                    event.row = r;
+                    event.col = c;
 
-//                     xQueueSend(event_queue, &event, 0);
+                    xQueueSend(key_event_queue, &event, 0);
+                    vTaskDelay(pdMS_TO_TICKS(200)); // debounce
+                }
+            }
+            // set signal back to high
+            gpio_set_level(row_pins[r], 1);
+        }
 
-//                     vTaskDelay(pdMS_TO_TICKS(200)); // debounce
-//                 }
-//             }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
 
-//             gpio_set_level(row_pins[r], 1);
-//         }
+void key_matrix_init() {
+    gpio_config_t row_conf = {
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = GPIO_OUTPUT_PIN_SEL
+    };
 
-//         vTaskDelay(pdMS_TO_TICKS(10));
-//     }
-// }
+    gpio_config(&row_conf);
 
-// void key_matrix_init() {
-//     gpio_config_t row_conf = {
-//         .mode = GPIO_MODE_OUTPUT,
-//         .pin_bit_mask = (1ULL<<18) | (1ULL<<19)
-//     };
+    // pull up means input always read high unless there is a low signal
+    gpio_config_t col_conf = {
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pin_bit_mask = GPIO_INPUT_PIN_SEL
+    };
 
-//     gpio_config(&row_conf);
+    gpio_config(&col_conf);
 
-//     gpio_config_t col_conf = {
-//         .mode = GPIO_MODE_INPUT,
-//         .pull_up_en = GPIO_PULLUP_ENABLE,
-//         .pin_bit_mask = (1ULL<<23) | (1ULL<<5) | (1ULL<<17)
-//     };
-
-//     gpio_config(&col_conf);
-
-//     for(int i=0;i<ROWS;i++)
-//         gpio_set_level(row_pins[i],1);
-// }
+    for(int i=0;i<ROWS;i++)
+        gpio_set_level(row_pins[i],1);
+}
 
 // esp_err_t led_handler(httpd_req_t *req) {
 //     char resp[64];
@@ -257,8 +265,7 @@ typedef struct {
 
 //     httpd_handle_t server = NULL;
 
-//     if (httpd_start(&server, &config) == ESP_OK)
-//     {
+//     if (httpd_start(&server, &config) == ESP_OK) {
 //         httpd_uri_t uri = {
 //             .uri = "/led",
 //             .method = HTTP_GET,
@@ -280,11 +287,10 @@ void app_main() {
     // unlock LED matrix FDh register
     // (maybe ?) set configurations register
 
-    ESP_LOGI(TAG, "I2C initialized successfully");
+    // ESP_LOGI(TAG, "I2C initialized successfully");
 
-    // key_matrix_init();
-
-    event_queue = xQueueCreate(10, sizeof(key_event_t));
+    key_matrix_init();
+    key_event_queue = xQueueCreate(10, sizeof(key_event_t));
 
     // xTaskCreate(
     //     led_matrix_task,
@@ -295,14 +301,14 @@ void app_main() {
     //     NULL
     // );
 
-    // xTaskCreate(
-    //     keyscan_task,
-    //     "keyscan_task",
-    //     2048,
-    //     NULL,
-    //     5,
-    //     NULL
-    // );
+    xTaskCreate(
+        keyscan_task,
+        "keyscan_task",
+        2048,
+        NULL,
+        5,
+        NULL
+    );
 
     // xTaskCreate(
     //     http_server_task,
@@ -313,7 +319,7 @@ void app_main() {
     //     NULL
     // );
 
-    ESP_ERROR_CHECK(i2c_master_bus_rm_device(dev_handle));
-    ESP_ERROR_CHECK(i2c_del_master_bus(bus_handle));
+    // ESP_ERROR_CHECK(i2c_master_bus_rm_device(dev_handle));
+    // ESP_ERROR_CHECK(i2c_del_master_bus(bus_handle));
     ESP_LOGI(TAG, "I2C de-initialized successfully");
 }
