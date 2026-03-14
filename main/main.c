@@ -1,0 +1,319 @@
+/*
+ * Author: yolicap
+ * AI Disclaimer: deez nuts 2026
+ */
+
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+
+#include "driver/i2c_master.h"
+// #include "driver/i2c.h"
+#include "driver/gpio.h"
+
+#include "esp_http_server.h"
+#include "esp_log.h"
+
+static const char *TAG = "MINITOP";
+
+// FROM IS31FL3741 STEMMA (LED MATRIX) DOCS:
+// fSCL Serial-clock frequency - 400 - 1000 kHz
+// ***** I2C CONFIGS *****
+#define I2C_CONTROLLER_SCL_IO CONFIG_I2C_MASTER_SCL
+#define I2C_CONTROLLER_SDA_IO CONFIG_I2C_MASTER_SDA
+#define I2C_CONTROLLER_NUM I2C_NUM_0
+#define I2C_MASTER_TX_BUF_DISABLE 0
+#define I2C_MASTER_RX_BUF_DISABLE 0   
+#define I2C_CONTROLLER_FREQ_HZ CONFIG_I2C_MASTER_FREQUENCY
+#define I2C_FREQ_HZ_MAX 1000000 // max speed of IS31FL3741 STEMMA (1000kHz)
+#define I2C_FREQ_HZ_MIN 400000 // min speed of IS31FL3741 STEMMA (400kHz)
+
+/*
+* A0 - 0 to write, 1 to read
+* A7:A3 - 01100 hard coded
+* A2:A1 - ADDR connected to GND, ADDR = 00
+*/
+#define IS31FL3741_ADDR_W 0x60
+#define IS31FL3741_ADDR_R 0x61
+
+// kilometers per second
+#define PWN1_R 0x00
+#define PWN2_R 0x01
+#define LED1_R 0x02
+#define LED2_R 0x03
+#define FUNC_R 0x04
+
+// ***** KEY MATRIX CONFIGS *****
+#define ROWS 2
+#define COLS 3
+
+// TODO
+gpio_num_t row_pins[ROWS] = {18, 19};
+gpio_num_t col_pins[COLS] = {23, 5, 17};
+
+typedef struct {
+    uint8_t row;
+    uint8_t col;
+} key_event_t;
+
+QueueHandle_t key_event_queue;
+
+typedef struct {
+    uint8_t page;
+    uint8_t led_r;
+    uint8_t led_g;
+    uint8_t led_b;
+} rgb_led_t;
+
+/**
+ * @brief led coordinate to page {0, 1} and addr
+ * if scaling, offset page by 2
+ * row/col 0-indext
+ */
+// void led_coord_to_struct(rgb_led_t * rgb, uint8_t row, uint8_t col) {
+//     if (col < 10 && row < 6) {
+//         rgb->page = 0x00
+//         // rgb->led_b = 
+//     } else {
+//         rgb->page = 0x01
+//     }
+// }
+
+// /**
+//  * @brief i2c master initialization
+//  */
+// void i2c_controller_init(i2c_master_bus_handle_t *bus_handle, i2c_master_dev_handle_t *dev_handle) {
+//     i2c_master_bus_config_t bus_config = {
+//         .i2c_port = I2C_CONTROLLER_NUM,
+//         .sda_io_num = I2C_CONTROLLER_SDA_IO,
+//         .scl_io_num = I2C_CONTROLLER_SCL_IO,
+//         .clk_source = I2C_CLK_SRC_DEFAULT,
+//         .glitch_ignore_cnt = 7,
+//         .flags.enable_internal_pullup = true,
+//     };
+//     ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, bus_handle));
+
+//     // init IS31FL3741 I2C
+//     i2c_device_config_t dev_config = {
+//         .dev_addr_length = I2C_ADDR_BIT_LEN_8,
+//         .device_address = IS31FL3741_ADDR_W,
+//         .scl_speed_hz = I2C_CONTROLLER_FREQ_HZ,
+//     };
+//     ESP_ERROR_CHECK(i2c_master_bus_add_device(*bus_handle, &dev_config, dev_handle));
+// }
+
+// /**
+//  * @brief set brightness of led
+//  * 
+//  */
+// static esp_err_t set_led_brightness(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr, uint8_t *data, size_t len) {
+//     // get led page and addr
+//     // set FEh to write
+//     // set FDh to page
+//     // set brightness
+//     return ESP_OK;
+// }
+
+// /**
+//  * @brief set color of led
+//  * 
+//  */
+// static esp_err_t set_led_color(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr, uint8_t *data, size_t len) {
+//     // get led page and addr
+//     // set FEh to write
+//     // set FDh to page
+//     // set brightness
+//     return ESP_OK;
+// }
+
+// /**
+//  * @brief Read a sequence of bytes from a IS31FL3741 registers
+//  * TODO : im gonna try to use the write address to read. lets see how it go
+//  */
+// static esp_err_t is31fl3741_register_read(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr, uint8_t *data, size_t len) {
+//     return i2c_master_transmit_receive(
+//         dev_handle, 
+//         &reg_addr, 
+//         1, 
+//         data, 
+//         len, 
+//         I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS
+//     );
+// }
+
+// /**
+//  * @brief Write a byte to a IS31FL3741 register
+//  * FDh Command Register (W)
+//  * - 0x00, 0x01 PWN Register
+//  * - 0x02, 0x03 Scaling Register
+//  * - 0x04 Function Register
+//  * FEh Command Register Write Lock (R/W)
+//  * F0h Interrupt Mask Register (W)
+//  * F1h Interrupt Status Register (R)
+//  * FCh ID Register  (R)
+//  */
+// static esp_err_t is31fl3741_register_write_byte(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr, uint8_t data) {
+//     uint8_t write_buf[2] = {reg_addr, data};
+//     return i2c_master_transmit(
+//         dev_handle, 
+//         write_buf, 
+//         sizeof(write_buf), 
+//         I2C_CONTROLLER_TIMEOUT_MS / portTICK_PERIOD_MS
+//     );
+// }
+
+// void led_matrix_write(uint8_t *data, size_t len) {
+//     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+
+//     i2c_controller_start(cmd);
+//     i2c_controller_write_byte(cmd, (LED_MATRIX_ADDR << 1) | I2C_CONTROLLER_WRITE, true);
+//     i2c_controller_write(cmd, data, len, true);
+//     i2c_controller_stop(cmd);
+
+//     i2c_controller_cmd_begin(I2C_CONTROLLER_NUM, cmd, pdMS_TO_TICKS(100));
+//     i2c_cmd_link_delete(cmd);
+// }
+
+// void led_matrix_task(void *arg) {
+//     key_event_t event;
+
+//     uint8_t frame[16] = {0};
+
+//     while (1)
+//     {
+//         if (xQueueReceive(event_queue, &event, portMAX_DELAY))
+//         {
+//             int index = event.row * COLS + event.col;
+
+//             frame[index] ^= 1;
+
+//             led_matrix_write(frame, sizeof(frame));
+//         }
+//     }
+// }
+
+// void keyscan_task(void *arg) {
+//     key_event_t event;
+
+//     while (1)
+//     {
+//         for (int r = 0; r < ROWS; r++)
+//         {
+//             gpio_set_level(row_pins[r], 0);
+
+//             for (int c = 0; c < COLS; c++)
+//             {
+//                 if (gpio_get_level(col_pins[c]) == 0)
+//                 {
+//                     event.row = r;
+//                     event.col = c;
+
+//                     xQueueSend(event_queue, &event, 0);
+
+//                     vTaskDelay(pdMS_TO_TICKS(200)); // debounce
+//                 }
+//             }
+
+//             gpio_set_level(row_pins[r], 1);
+//         }
+
+//         vTaskDelay(pdMS_TO_TICKS(10));
+//     }
+// }
+
+// void key_matrix_init() {
+//     gpio_config_t row_conf = {
+//         .mode = GPIO_MODE_OUTPUT,
+//         .pin_bit_mask = (1ULL<<18) | (1ULL<<19)
+//     };
+
+//     gpio_config(&row_conf);
+
+//     gpio_config_t col_conf = {
+//         .mode = GPIO_MODE_INPUT,
+//         .pull_up_en = GPIO_PULLUP_ENABLE,
+//         .pin_bit_mask = (1ULL<<23) | (1ULL<<5) | (1ULL<<17)
+//     };
+
+//     gpio_config(&col_conf);
+
+//     for(int i=0;i<ROWS;i++)
+//         gpio_set_level(row_pins[i],1);
+// }
+
+// esp_err_t led_handler(httpd_req_t *req) {
+//     char resp[64];
+
+//     snprintf(resp, sizeof(resp), "LED command received");
+
+//     httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+
+//     return ESP_OK;
+// }
+
+// void http_server_task(void *arg) {
+//     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+
+//     httpd_handle_t server = NULL;
+
+//     if (httpd_start(&server, &config) == ESP_OK)
+//     {
+//         httpd_uri_t uri = {
+//             .uri = "/led",
+//             .method = HTTP_GET,
+//             .handler = led_handler
+//         };
+
+//         httpd_register_uri_handler(server, &uri);
+//     }
+
+//     vTaskDelete(NULL);
+// }
+
+void app_main() {
+
+    // i2c_master_bus_handle_t bus_handle;
+    // i2c_master_dev_handle_t dev_handle;
+    // i2c_controller_init(&bus_handle, &dev_handle);
+
+    // unlock LED matrix FDh register
+    // (maybe ?) set configurations register
+
+    ESP_LOGI(TAG, "I2C initialized successfully");
+
+    // key_matrix_init();
+
+    event_queue = xQueueCreate(10, sizeof(key_event_t));
+
+    // xTaskCreate(
+    //     led_matrix_task,
+    //     "led_matrix_task",
+    //     4096,
+    //     NULL,
+    //     5,
+    //     NULL
+    // );
+
+    // xTaskCreate(
+    //     keyscan_task,
+    //     "keyscan_task",
+    //     2048,
+    //     NULL,
+    //     5,
+    //     NULL
+    // );
+
+    // xTaskCreate(
+    //     http_server_task,
+    //     "http_server_task",
+    //     4096,
+    //     NULL,
+    //     4,
+    //     NULL
+    // );
+
+    ESP_ERROR_CHECK(i2c_master_bus_rm_device(dev_handle));
+    ESP_ERROR_CHECK(i2c_del_master_bus(bus_handle));
+    ESP_LOGI(TAG, "I2C de-initialized successfully");
+}

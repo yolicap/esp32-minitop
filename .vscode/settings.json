@@ -1,0 +1,11 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.openOcdConfigs": [
+    "board/esp32c3-ftdi.cfg"
+  ],
+  "idf.port": "detect",
+  "idf.currentSetup": "/Users/salgado/esp/esp-idf",
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32c3"
+  }
+}
