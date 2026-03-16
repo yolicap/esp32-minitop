@@ -4,6 +4,8 @@
  */
 
 #include <stdio.h>
+#include "esp_err.h"
+#include "esp_wifi_types_generic.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -13,19 +15,26 @@
 #include "driver/gpio.h"
 
 #include "esp_http_server.h"
+#include "esp_event.h"
 #include "esp_log.h"
 
+#include "esp_wifi.h"
+#include "esp_event.h"
+
+#include "nvs_flash.h"
+
 static const char *TAG = "MINITOP";
+static const char *TAG_WIFI = "WIFI_INFO";
 
 // FROM IS31FL3741 STEMMA (LED MATRIX) DOCS:
 // fSCL Serial-clock frequency - 400 - 1000 kHz
 // ***** I2C CONFIGS *****
-#define I2C_CONTROLLER_SCL_IO CONFIG_I2C_MASTER_SCL
-#define I2C_CONTROLLER_SDA_IO CONFIG_I2C_MASTER_SDA
-#define I2C_CONTROLLER_NUM I2C_NUM_0
-#define I2C_MASTER_TX_BUF_DISABLE 0
-#define I2C_MASTER_RX_BUF_DISABLE 0   
-#define I2C_CONTROLLER_FREQ_HZ CONFIG_I2C_MASTER_FREQUENCY
+// #define I2C_CONTROLLER_SCL_IO CONFIG_I2C_MASTER_SCL
+// #define I2C_CONTROLLER_SDA_IO CONFIG_I2C_MASTER_SDA
+// #define I2C_CONTROLLER_NUM I2C_NUM_0
+// #define I2C_MASTER_TX_BUF_DISABLE 0
+// #define I2C_MASTER_RX_BUF_DISABLE 0   
+// #define I2C_CONTROLLER_FREQ_HZ CONFIG_I2C_MASTER_FREQUENCY
 #define I2C_FREQ_HZ_MAX 1000000 // max speed of IS31FL3741 STEMMA (1000kHz)
 #define I2C_FREQ_HZ_MIN 400000 // min speed of IS31FL3741 STEMMA (400kHz)
 
@@ -67,7 +76,7 @@ typedef struct {
     uint8_t col;
 } key_event_t;
 
-QueueHandle_t key_event_queue;
+// QueueHandle_t key_event_queue;
 
 typedef struct {
     uint8_t page;
@@ -203,82 +212,126 @@ typedef struct {
 //     }
 // }
 
-void keyscan_task(void *arg) {
-    key_event_t event;
+// void keyscan_task(void *arg) {
+//     key_event_t event;
 
-    while (1) {
-        for (int r = 0; r < ROWS; r++) {
-            // set to low
-            gpio_set_level(row_pins[r], 0);
+//     while (1) {
+//         for (int r = 0; r < ROWS; r++) {
+//             // set to low
+//             gpio_set_level(row_pins[r], 0);
 
-            for (int c = 0; c < COLS; c++) {
-                // if signal low, col is being pressed
-                if (gpio_get_level(col_pins[c]) == 0) {
-                    event.row = r;
-                    event.col = c;
+//             for (int c = 0; c < COLS; c++) {
+//                 // if signal low, col is being pressed
+//                 if (gpio_get_level(col_pins[c]) == 0) {
+//                     event.row = r;
+//                     event.col = c;
 
-                    xQueueSend(key_event_queue, &event, 0);
-                    vTaskDelay(pdMS_TO_TICKS(200)); // debounce
-                }
-            }
-            // set signal back to high
-            gpio_set_level(row_pins[r], 1);
-        }
+//                     xQueueSend(key_event_queue, &event, 0);
+//                     vTaskDelay(pdMS_TO_TICKS(200)); // debounce
+//                 }
+//             }
+//             // set signal back to high
+//             gpio_set_level(row_pins[r], 1);
+//         }
 
-        vTaskDelay(pdMS_TO_TICKS(10));
+//         vTaskDelay(pdMS_TO_TICKS(10));
+//     }
+// }
+
+// void key_matrix_init() {
+//     gpio_config_t row_conf = {
+//         .mode = GPIO_MODE_OUTPUT,
+//         .pin_bit_mask = GPIO_OUTPUT_PIN_SEL
+//     };
+
+//     gpio_config(&row_conf);
+
+//     // pull up means input always read high unless there is a low signal
+//     gpio_config_t col_conf = {
+//         .mode = GPIO_MODE_INPUT,
+//         .pull_up_en = GPIO_PULLUP_ENABLE,
+//         .pin_bit_mask = GPIO_INPUT_PIN_SEL
+//     };
+
+//     gpio_config(&col_conf);
+
+//     for(int i=0;i<ROWS;i++)
+//         gpio_set_level(row_pins[i],1);
+// }
+
+esp_err_t led_handler(httpd_req_t *req) {
+    char resp[64];
+
+    snprintf(resp, sizeof(resp), "LED command received");
+
+    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+
+    return ESP_OK;
+}
+
+void http_server_task(void *arg) {
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    httpd_handle_t server = NULL;
+
+    ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
+    if (httpd_start(&server, &config) == ESP_OK) {
+        ESP_LOGI(TAG, "Registering URI handlers");
+        httpd_uri_t uri = {
+            .uri = "/led",
+            .method = HTTP_GET,
+            .handler = led_handler
+        };
+
+        httpd_register_uri_handler(server, &uri);
+    }
+
+    ESP_LOGI(TAG, "HTTP task done!");
+    vTaskDelete(NULL);
+}
+
+static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        printf("Wi-Fi started! Now attempting to connect...\n");
+        esp_wifi_connect(); // This actually triggers the connection
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        printf("Disconnected. Retrying...\n");
+        esp_wifi_connect(); // Optional: Auto-reconnect logic
+    }else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG_WIFI, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
     }
 }
 
-void key_matrix_init() {
-    gpio_config_t row_conf = {
-        .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = GPIO_OUTPUT_PIN_SEL
+esp_err_t wifi_init(){
+    ESP_ERROR_CHECK(esp_netif_init());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&init_config);
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = "", // DONT PUSH ME BREH
+            .password = "", // DONT PUSH ME BREH
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
     };
 
-    gpio_config(&row_conf);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
 
-    // pull up means input always read high unless there is a low signal
-    gpio_config_t col_conf = {
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pin_bit_mask = GPIO_INPUT_PIN_SEL
-    };
+    esp_event_handler_instance_t instance_got_ip;
+    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL);
+    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip);
 
-    gpio_config(&col_conf);
-
-    for(int i=0;i<ROWS;i++)
-        gpio_set_level(row_pins[i],1);
+    esp_wifi_start();
+    return ESP_OK;
 }
 
-// esp_err_t led_handler(httpd_req_t *req) {
-//     char resp[64];
-
-//     snprintf(resp, sizeof(resp), "LED command received");
-
-//     httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
-
-//     return ESP_OK;
-// }
-
-// void http_server_task(void *arg) {
-//     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-
-//     httpd_handle_t server = NULL;
-
-//     if (httpd_start(&server, &config) == ESP_OK) {
-//         httpd_uri_t uri = {
-//             .uri = "/led",
-//             .method = HTTP_GET,
-//             .handler = led_handler
-//         };
-
-//         httpd_register_uri_handler(server, &uri);
-//     }
-
-//     vTaskDelete(NULL);
-// }
-
 void app_main() {
+
+    ESP_ERROR_CHECK(nvs_flash_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     // i2c_master_bus_handle_t bus_handle;
     // i2c_master_dev_handle_t dev_handle;
@@ -288,9 +341,10 @@ void app_main() {
     // (maybe ?) set configurations register
 
     // ESP_LOGI(TAG, "I2C initialized successfully");
-
-    key_matrix_init();
-    key_event_queue = xQueueCreate(10, sizeof(key_event_t));
+    printf("pls work!s");
+    ESP_LOGI(TAG, "app started");
+    // key_matrix_init();
+    // key_event_queue = xQueueCreate(10, sizeof(key_event_t));
 
     // xTaskCreate(
     //     led_matrix_task,
@@ -301,23 +355,25 @@ void app_main() {
     //     NULL
     // );
 
-    xTaskCreate(
-        keyscan_task,
-        "keyscan_task",
-        2048,
-        NULL,
-        5,
-        NULL
-    );
-
     // xTaskCreate(
-    //     http_server_task,
-    //     "http_server_task",
-    //     4096,
+    //     keyscan_task,
+    //     "keyscan_task",
+    //     2048,
     //     NULL,
-    //     4,
+    //     5,
     //     NULL
     // );
+
+    ESP_ERROR_CHECK(wifi_init());
+
+    xTaskCreate(
+        http_server_task,
+        "http_server_task",
+        4096,
+        NULL,
+        4,
+        NULL
+    );
 
     // ESP_ERROR_CHECK(i2c_master_bus_rm_device(dev_handle));
     // ESP_ERROR_CHECK(i2c_del_master_bus(bus_handle));

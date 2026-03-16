@@ -1,5 +1,7 @@
 # ESP-Minitop
 
+source ~/esp/esp-idf/export.sh
+
 ```
 ├── CMakeLists.txt
 ├── pytest_hello_world.py      Python script used for automated testing
