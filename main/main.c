@@ -1,6 +1,5 @@
 /*
  * Author: yolicap
- * AI Disclaimer: deez nuts 2026
  */
 
 #include <stdio.h>
@@ -11,6 +10,7 @@
 #include "freertos/queue.h"
 
 #include "driver/i2c_master.h"
+// #include "driver/i2c_types.h"
 // #include "driver/i2c.h"
 #include "driver/gpio.h"
 
@@ -28,23 +28,28 @@ static const char *TAG_WIFI = "WIFI_INFO";
 
 // FROM IS31FL3741 STEMMA (LED MATRIX) DOCS:
 // fSCL Serial-clock frequency - 400 - 1000 kHz
+// TODO export I2C configs to headers file
+// TODO export 12C code to external file
 // ***** I2C CONFIGS *****
-// #define I2C_CONTROLLER_SCL_IO CONFIG_I2C_MASTER_SCL
-// #define I2C_CONTROLLER_SDA_IO CONFIG_I2C_MASTER_SDA
-// #define I2C_CONTROLLER_NUM I2C_NUM_0
-// #define I2C_MASTER_TX_BUF_DISABLE 0
-// #define I2C_MASTER_RX_BUF_DISABLE 0   
-// #define I2C_CONTROLLER_FREQ_HZ CONFIG_I2C_MASTER_FREQUENCY
+#define I2C_CONTROLLER_SCL_IO GPIO_NUM_8
+#define I2C_CONTROLLER_SDA_IO GPIO_NUM_9
+#define I2C_CONTROLLER_NUM I2C_NUM_0
+#define I2C_CONTROLLER_TX_BUF_DISABLE 0
+#define I2C_CONTROLLER_RX_BUF_DISABLE 0   
 #define I2C_FREQ_HZ_MAX 1000000 // max speed of IS31FL3741 STEMMA (1000kHz)
 #define I2C_FREQ_HZ_MIN 400000 // min speed of IS31FL3741 STEMMA (400kHz)
+#define TEMP 100000
+#define I2C_CONTROLLER_FREQ_HZ TEMP
+#define I2C_CONTROLLER_TIMEOUT_MS       1000
 
 /*
 * A0 - 0 to write, 1 to read
 * A7:A3 - 01100 hard coded
 * A2:A1 - ADDR connected to GND, ADDR = 00
 */
-#define IS31FL3741_ADDR_W 0x60
-#define IS31FL3741_ADDR_R 0x61
+#define IS31FL3741_ADDR_W 0x30
+// #define IS31FL3741_ADDR_R 0x61
+// #define IS31FL3741_ADDR_W 0x00
 
 // kilometers per second
 #define PWN1_R 0x00
@@ -52,6 +57,8 @@ static const char *TAG_WIFI = "WIFI_INFO";
 #define LED1_R 0x02
 #define LED2_R 0x03
 #define FUNC_R 0x04
+
+#define FDH_WRITE_CMD 0xC5
 
 // ***** KEY MATRIX CONFIGS *****
 #define ROWS 2
@@ -78,55 +85,74 @@ typedef struct {
 
 // QueueHandle_t key_event_queue;
 
+// user perspective
+typedef struct {
+    uint8_t row;
+    uint8_t col;
+} led_coords_t;
+
+// code perspective
 typedef struct {
     uint8_t page;
+    uint8_t addr;
+} led_mapping_t;
+
+// rgb data
+typedef struct {
     uint8_t led_r;
     uint8_t led_g;
     uint8_t led_b;
-} rgb_led_t;
+} rgb_t;
 
 /**
  * @brief led coordinate to page {0, 1} and addr
  * if scaling, offset page by 2
  * row/col 0-indext
  */
-// void led_coord_to_struct(rgb_led_t * rgb, uint8_t row, uint8_t col) {
-//     if (col < 10 && row < 6) {
-//         rgb->page = 0x00
-//         // rgb->led_b = 
-//     } else {
-//         rgb->page = 0x01
-//     }
-// }
+void coord_to_mapping(led_coords_t * coords, led_mapping_t * mapping) {
+    if (coords->col <= 10u && coords->row <= 6u) {
+        mapping->page = 0x00;
+        mapping->addr = coords->col + (coords->row * 10u);
+    } else {
+        mapping->page = 0x01;
 
-// /**
-//  * @brief i2c master initialization
-//  */
-// void i2c_controller_init(i2c_master_bus_handle_t *bus_handle, i2c_master_dev_handle_t *dev_handle) {
-//     i2c_master_bus_config_t bus_config = {
-//         .i2c_port = I2C_CONTROLLER_NUM,
-//         .sda_io_num = I2C_CONTROLLER_SDA_IO,
-//         .scl_io_num = I2C_CONTROLLER_SCL_IO,
-//         .clk_source = I2C_CLK_SRC_DEFAULT,
-//         .glitch_ignore_cnt = 7,
-//         .flags.enable_internal_pullup = true,
-//     };
-//     ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, bus_handle));
+        // bottom side of page 1
+        if (coords->col <= 10u) {
+            mapping->addr = coords->col + ((coords->row - 6u) * 10u);
+        } else {
+            mapping->addr = ((coords->col - 10u) + (coords->row * 10u)) + 0x59;
+        }
+    }
+}
 
-//     // init IS31FL3741 I2C
-//     i2c_device_config_t dev_config = {
-//         .dev_addr_length = I2C_ADDR_BIT_LEN_8,
-//         .device_address = IS31FL3741_ADDR_W,
-//         .scl_speed_hz = I2C_CONTROLLER_FREQ_HZ,
-//     };
-//     ESP_ERROR_CHECK(i2c_master_bus_add_device(*bus_handle, &dev_config, dev_handle));
-// }
+/**
+ * @brief i2c master initialization
+ */
+void i2c_controller_init(i2c_master_bus_handle_t *bus_handle, i2c_master_dev_handle_t *dev_handle) {
+    i2c_master_bus_config_t bus_config = {
+        .i2c_port = I2C_CONTROLLER_NUM,
+        .sda_io_num = I2C_CONTROLLER_SDA_IO,
+        .scl_io_num = I2C_CONTROLLER_SCL_IO,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, bus_handle));
 
-// /**
-//  * @brief set brightness of led
-//  * 
-//  */
-// static esp_err_t set_led_brightness(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr, uint8_t *data, size_t len) {
+    // init IS31FL3741 I2C
+    i2c_device_config_t dev_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = IS31FL3741_ADDR_W,
+        .scl_speed_hz = I2C_CONTROLLER_FREQ_HZ,
+    };
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(*bus_handle, &dev_config, dev_handle));
+}
+
+/**
+ * @brief set brightness of led
+ * 
+ */
+// static esp_err_t set_led_brightness(i2c_master_dev_handle_t dev_handle, uint8_t *data, size_t len) {
 //     // get led page and addr
 //     // set FEh to write
 //     // set FDh to page
@@ -134,65 +160,69 @@ typedef struct {
 //     return ESP_OK;
 // }
 
-// /**
-//  * @brief set color of led
-//  * 
-//  */
-// static esp_err_t set_led_color(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr, uint8_t *data, size_t len) {
-//     // get led page and addr
-//     // set FEh to write
-//     // set FDh to page
-//     // set brightness
-//     return ESP_OK;
-// }
+/**
+ * @brief Read a byte from a IS31FL3741 registers
+ */
+static esp_err_t is31fl3741_register_read(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr, uint8_t *data) {
+    uint8_t data_tx = reg_addr;
+    return i2c_master_transmit_receive(
+        dev_handle, 
+        &data_tx, 1, 
+        data, 1, 
+        -1
+    );
+    // return i2c_master_receive(
+    //     dev_handle,
+    //     data,
+    //     1,
+    //     -1
+    // ); 
+}
 
-// /**
-//  * @brief Read a sequence of bytes from a IS31FL3741 registers
-//  * TODO : im gonna try to use the write address to read. lets see how it go
-//  */
-// static esp_err_t is31fl3741_register_read(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr, uint8_t *data, size_t len) {
-//     return i2c_master_transmit_receive(
-//         dev_handle, 
-//         &reg_addr, 
-//         1, 
-//         data, 
-//         len, 
-//         I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS
-//     );
-// }
+/**
+ * @brief Write a byte to a IS31FL3741 register
+ * FDh Command Register (W)
+ * - 0x00, 0x01 PWN Register
+ * - 0x02, 0x03 Scaling Register
+ * - 0x04 Function Register
+ * FEh Command Register Write Lock (R/W)
+ * F0h Interrupt Mask Register (W)
+ * F1h Interrupt Status Register (R)
+ * FCh ID Register  (R)
+ * a human wrote this btw
+ */
+static esp_err_t is31fl3741_register_write(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr, uint8_t data) {
+    uint8_t write_buf[2] = {reg_addr, data};
+    return i2c_master_transmit(
+        dev_handle, 
+        write_buf, 
+        2, 
+        // I2C_CONTROLLER_TIMEOUT_MS / portTICK_PERIOD_MS
+        -1
+    );
+}
 
-// /**
-//  * @brief Write a byte to a IS31FL3741 register
-//  * FDh Command Register (W)
-//  * - 0x00, 0x01 PWN Register
-//  * - 0x02, 0x03 Scaling Register
-//  * - 0x04 Function Register
-//  * FEh Command Register Write Lock (R/W)
-//  * F0h Interrupt Mask Register (W)
-//  * F1h Interrupt Status Register (R)
-//  * FCh ID Register  (R)
-//  */
-// static esp_err_t is31fl3741_register_write_byte(i2c_master_dev_handle_t dev_handle, uint8_t reg_addr, uint8_t data) {
-//     uint8_t write_buf[2] = {reg_addr, data};
-//     return i2c_master_transmit(
-//         dev_handle, 
-//         write_buf, 
-//         sizeof(write_buf), 
-//         I2C_CONTROLLER_TIMEOUT_MS / portTICK_PERIOD_MS
-//     );
-// }
+/**
+ * @brief set color of led
+ * 
+ */
+static esp_err_t set_led_color(i2c_master_dev_handle_t dev_handle, rgb_t *data, led_coords_t *coords) {
+    // get led page and addr
+    led_mapping_t mapping;
+    coord_to_mapping(coords, &mapping);
+    
+    // do 3 times
+    // set FEh to write: this unlocks FDh register 
+    ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, 0xFE, FDH_WRITE_CMD));
+    // set FDh to page
+    ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, 0xFD, mapping.page));
+    // set brightness
+    ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, (mapping.addr), data->led_r));
+    ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, (mapping.addr)+1, data->led_g));
+    ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, (mapping.addr)+2, data->led_b));
 
-// void led_matrix_write(uint8_t *data, size_t len) {
-//     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-
-//     i2c_controller_start(cmd);
-//     i2c_controller_write_byte(cmd, (LED_MATRIX_ADDR << 1) | I2C_CONTROLLER_WRITE, true);
-//     i2c_controller_write(cmd, data, len, true);
-//     i2c_controller_stop(cmd);
-
-//     i2c_controller_cmd_begin(I2C_CONTROLLER_NUM, cmd, pdMS_TO_TICKS(100));
-//     i2c_cmd_link_delete(cmd);
-// }
+    return ESP_OK;
+}
 
 // void led_matrix_task(void *arg) {
 //     key_event_t event;
@@ -238,26 +268,26 @@ typedef struct {
 //     }
 // }
 
-// void key_matrix_init() {
-//     gpio_config_t row_conf = {
-//         .mode = GPIO_MODE_OUTPUT,
-//         .pin_bit_mask = GPIO_OUTPUT_PIN_SEL
-//     };
+void key_matrix_init() {
+    gpio_config_t row_conf = {
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = GPIO_OUTPUT_PIN_SEL
+    };
 
-//     gpio_config(&row_conf);
+    gpio_config(&row_conf);
 
-//     // pull up means input always read high unless there is a low signal
-//     gpio_config_t col_conf = {
-//         .mode = GPIO_MODE_INPUT,
-//         .pull_up_en = GPIO_PULLUP_ENABLE,
-//         .pin_bit_mask = GPIO_INPUT_PIN_SEL
-//     };
+    // pull up means input always read high unless there is a low signal
+    gpio_config_t col_conf = {
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pin_bit_mask = GPIO_INPUT_PIN_SEL
+    };
 
-//     gpio_config(&col_conf);
+    gpio_config(&col_conf);
 
-//     for(int i=0;i<ROWS;i++)
-//         gpio_set_level(row_pins[i],1);
-// }
+    for(int i=0;i<ROWS;i++)
+        gpio_set_level(row_pins[i],1);
+}
 
 esp_err_t led_handler(httpd_req_t *req) {
     char resp[64];
@@ -333,16 +363,39 @@ void app_main() {
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    // i2c_master_bus_handle_t bus_handle;
-    // i2c_master_dev_handle_t dev_handle;
-    // i2c_controller_init(&bus_handle, &dev_handle);
+    i2c_master_bus_handle_t bus_handle;
+    i2c_master_dev_handle_t dev_handle;
+    i2c_controller_init(&bus_handle, &dev_handle);
 
-    // unlock LED matrix FDh register
-    // (maybe ?) set configurations register
+    uint8_t data_rd;
+    ESP_ERROR_CHECK(is31fl3741_register_read(dev_handle, 0xFC, &data_rd));
+    printf("we good fam. %02x\n", data_rd);
+    // ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, 0xFE, FDH_WRITE_CMD));
 
-    // ESP_LOGI(TAG, "I2C initialized successfully");
-    printf("pls work!s");
-    ESP_LOGI(TAG, "app started");
+    ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, 0xFE, FDH_WRITE_CMD));
+    // Switch to Page 4 (Function Page)
+    ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, 0xFD, 0x04));
+    // Set Configuration Register (0x00) to 0x01 (Normal Operation)
+    ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, 0x00, 0x01));
+    // Set Global Current Control (0x01) to 0xFF (Max brightness)
+    ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, 0x01, 0xFF));
+
+    ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, 0x01, 0xFF)); // Max global current
+
+    // Fill Page 2 (Scaling 1) with 0xFF
+    ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, 0xFE, FDH_WRITE_CMD)); // Unlock
+    ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, 0xFD, 0x02));          // Page 2
+    for (int i = 0; i <= 0xAB; i++) {
+        is31fl3741_register_write(dev_handle, i, 0xFF);
+    }
+
+    // Fill Page 3 (Scaling 2) with 0xFF
+    ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, 0xFE, FDH_WRITE_CMD)); // Unlock
+    ESP_ERROR_CHECK(is31fl3741_register_write(dev_handle, 0xFD, 0x03));          // Page 3
+    for (int i = 0; i <= 0xAA; i++) {
+        is31fl3741_register_write(dev_handle, i, 0xFF);
+    }
+
     // key_matrix_init();
     // key_event_queue = xQueueCreate(10, sizeof(key_event_t));
 
@@ -366,6 +419,7 @@ void app_main() {
 
     ESP_ERROR_CHECK(wifi_init());
 
+    // TODO: only if wifi connected
     xTaskCreate(
         http_server_task,
         "http_server_task",
@@ -375,7 +429,28 @@ void app_main() {
         NULL
     );
 
+    ESP_LOGI(TAG, "app started");
+
     // ESP_ERROR_CHECK(i2c_master_bus_rm_device(dev_handle));
     // ESP_ERROR_CHECK(i2c_del_master_bus(bus_handle));
-    ESP_LOGI(TAG, "I2C de-initialized successfully");
+    // ESP_LOGI(TAG, "I2C de-initialized successfully");
+
+    uint8_t led = 0;
+    led_coords_t coords;
+    rgb_t data;
+    data.led_r = 0xFF;
+    data.led_g = 0xFF;
+    data.led_b = 0xFF;
+        
+    while (true) {
+        if (led <= 104) {
+            coords.row = led / 13;
+            coords.col = led % 13;
+            set_led_color(dev_handle, &data, &coords);
+        } else {
+            led = 0;
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        led++;
+    }
 }
